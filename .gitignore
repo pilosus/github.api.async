@@ -1,0 +1,76 @@
+# -*- mode: gitignore; -*-
+
+/target
+/classes
+/checkouts
+profiles.clj
+*.jar
+*.class
+/.lein-*
+/.nrepl-port
+/.prepl-port
+.hgignore
+.hg/
+.cpcache/
+.cpcache
+.rebel_readline_history
+.eastwood
+.nrepl-history
+.nrepl-port
+.portal
+.project
+.socket-repl-port
+
+*~
+\#*\#
+/.emacs.desktop
+/.emacs.desktop.lock
+*.elc
+auto-save-list
+tramp
+.\#*
+
+# Org-mode
+.org-id-locations
+*_archive
+
+# flymake-mode
+*_flymake.*
+
+# eshell files
+/eshell/history
+/eshell/lastdir
+
+# elpa packages
+/elpa/
+
+# reftex files
+*.rel
+
+# AUCTeX auto folder
+/auto/
+
+# cask packages
+.cask/
+dist/
+
+# Flycheck
+flycheck_*.el
+
+# server auth directory
+/server/
+
+# projectiles files
+.projectile
+
+# directory configuration
+.dir-locals.el
+
+# network security
+/network-security.data
+
+# project notes
+scratch.md
+
+# playing around in REPL
+repl.clj

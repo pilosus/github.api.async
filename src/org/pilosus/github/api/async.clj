@@ -1,8 +1,9 @@
 (ns org.pilosus.github.api.async
   (:require
    [cheshire.core :as json]
-   [clojure.string :as s]
+   [clj-yaml.core :as yaml]
    [clojure.core.async :as async]
+   [clojure.string :as s]
    [org.httpkit.client :as http]))
 
 ;; Const & helper functions
@@ -20,6 +21,19 @@
      {"Content-Type" "application/json"
       "X-GitHub-API-Version" "2022-11-28"}
      header-token)))
+
+(let [log-c (async/chan 1024)]
+  (async/go
+    (loop []
+      (when-some [v (async/<! log-c)]
+        (println v)
+        (recur))))
+
+  (defn log
+    "Simple logging for async code"
+    [& items]
+    (when (:verbose @options)
+      (async/>!! log-c (apply str (interpose " " items))))))
 
 (defn rate-limiter-init!
   "Init counter with the current GitHub rate limits"
@@ -56,18 +70,6 @@
         :rate-limit rate-limit
         :verbose verbose)))))
 
-(let [log-c (async/chan 1024)]
-  (async/go
-    (loop []
-      (when-some [v (async/<! log-c)]
-        (println v)
-        (recur))))
-
-  (defn log
-    "Simple logging for async code"
-    [& items]
-    (async/>!! log-c (apply str (interpose " " items)))))
-
 ;; Async pipelines
 
 (defn repo-url->api-url
@@ -86,6 +88,7 @@
   "Process URLs to get a GitHub repo's API handler URL"
   [from to threads]
   (let [f (fn [{:keys [url] :as data}]
+            (log "Processing URL:" url)
             (-> data
                 (assoc :api-url (repo-url->api-url url))))]
     ;; CPU-bound
@@ -122,19 +125,19 @@
         block? (and use-rate-limit? rate-limit-exceeded (pos? time-to-reset))
         request {:url api-url :method :get :headers (request-headers)}
         callback (partial count-stargazers from-chan-item to-chan)]
+    (log "Requesting URL:" api-url)
     (if block?
       (do
         ;; The whole thread (or more depending on parallelism) will be blocked
         ;; It's ok, because rate-limits are per user
-        (when (:verbose @options)
-          (log
-           "Rate limit exceeded:"
-           "limit:" limit
-           "used:" used
-           "time to reset, min:" (-> time-to-reset
-                                     (/ 1000 60)
-                                     float
-                                     Math/round)))
+        (log
+         "Rate limit exceeded:"
+         "limit:" limit
+         "used:" used
+         "time to reset, min:" (-> time-to-reset
+                                   (/ 1000 60)
+                                   float
+                                   Math/round))
         (Thread/sleep time-to-reset)
         (rate-limiter-init!)
         (http/request request callback))
@@ -174,15 +177,41 @@
 
 ;; REPL payground
 
+(defn- normalize
+  "Normalize item by values for a given key"
+  [k item]
+  (reduce
+   (fn [acc v] (conj acc (assoc item k v)))
+   '() (get item k)))
+
+(defn- flatten-keys
+  "Flatten nested map"
+  [item]
+  (let [ks [:stats :stars]]
+    (-> item
+        (assoc (last ks) (get-in item ks))
+        (dissoc (first ks)))))
+
+(defn toolbox-stats
+  "Get projects from clojure-toolbox.com, enrich with GitHub stars"
+  [opts]
+  (let [projects
+        (-> "https://raw.githubusercontent.com/weavejester/clojure-toolbox.com/master/projects.yml"
+            slurp
+            yaml/parse-string
+            vals
+            (repo-stats opts))]
+    (->> projects
+         (map (partial normalize :categories))
+         flatten
+         (map flatten-keys))))
+
 (comment
-  (def example-projects
-    [{:url "https://clojure.org/"}
-     {:url "https://example.com/"}
-     {:url "https://github.com/clojure/clojure"}
-     {:url "https://github.com/clojure/clojurescript"}
-     {:url "https://github.com/clojure/core.async"}
-     {:url "https://github.com/clojure/core.logic"}
-     {:url "https://github.com/clojure/spec.alpha"}
-     {:url "https://github.com/clojure/tools.cli"}
-     {:url "https://github.com/clojure/tools.deps.cli"}
-     {:url "https://github.com/clojure/tools.logging"}]))
+  (time
+   (def projects
+     (group-by
+      :categories
+      (toolbox-stats
+       {:token nil
+        :threads-stats 10
+        :verbose false})))))

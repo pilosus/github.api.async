@@ -5,60 +5,23 @@
    [clojure.core.async :as async]
    [org.httpkit.client :as http]))
 
-;; Helper functions & const
+;; Const & helper functions
 
-(def api-handler-base "https://api.github.com/repos")
+(def options (atom {:token nil :rate-limit false :verbose false}))
 
-(def delay-offset 10000)
+(def rate-limiter (atom {:limit 0 :used 0 :reset 0}))
 
-(def request-counter (atom {:limit 0 :used 0 :reset 0}))
-
-(defn counter-inc!
-  []
-  (swap! request-counter (fn [s] (update s :used inc))))
-
-(defn counter-set!
-  [limit used reset]
-  (swap! request-counter (fn [s] (assoc s :limit limit :used used :reset reset))))
-
-(def token-atom (atom nil))
-
-(defn github-token
-  "Get GitHub API Token"
-  []
-  (or (System/getenv "GITHUB_TOKEN") @token-atom))
-
-(defn headers
+(defn request-headers
   "Get header for a HTTP request"
   []
-  (let [token (github-token)
-        header-token (when token
-                       {"Authorization" (format "Bearer %s" token)})]
+  (let [token (or (:token @options) (System/getenv "GITHUB_TOKEN"))
+        header-token (when token {"Authorization" (format "Bearer %s" token)})]
     (merge
      {"Content-Type" "application/json"
       "X-GitHub-API-Version" "2022-11-28"}
      header-token)))
 
-(defn http-status-ok?
-  "Return true if a HTTP status code successful"
-  [status-code]
-  (and
-   (>= status-code 200)
-   (< status-code 300)))
-
-(let [log-c (async/chan 1024)]
-  (async/go
-    (loop []
-      (when-some [v (async/<! log-c)]
-        (println v)
-        (recur))))
-
-  (defn log
-    "Simple logging for async debugging"
-    [& items]
-    (async/>!! log-c (apply str (interpose " " items)))))
-
-(defn counter-init!
+(defn rate-limiter-init!
   "Init counter with the current GitHub rate limits"
   []
   (let [callback
@@ -73,9 +36,37 @@
         @(http/request
           {:url "https://api.github.com/rate_limit"
            :method :get
-           :headers (headers)}
+           :headers (request-headers)}
           callback)]
-    (counter-set! limit used (* 1000 reset))))
+    (swap!
+     rate-limiter
+     (fn [s] (assoc s :limit limit :used used :reset (* 1000 reset))))))
+
+(defn opts-init!
+  "Init options atom"
+  [opts]
+  (let [{:keys [token rate-limit verbose]
+         :or {rate-limit false verbose false}} opts]
+    (swap!
+     options
+     (fn [s]
+       (assoc
+        s
+        :token token
+        :rate-limit rate-limit
+        :verbose verbose)))))
+
+(let [log-c (async/chan 1024)]
+  (async/go
+    (loop []
+      (when-some [v (async/<! log-c)]
+        (println v)
+        (recur))))
+
+  (defn log
+    "Simple logging for async code"
+    [& items]
+    (async/>!! log-c (apply str (interpose " " items)))))
 
 ;; Async pipelines
 
@@ -88,10 +79,10 @@
                                   (catch Exception _ nil))
 
         api-url (when (= 3 (count parts))
-                  (format "%s/%s/%s" api-handler-base user repo))]
+                  (format "https://api.github.com/repos/%s/%s" user repo))]
     api-url))
 
-(defn pipe-urls
+(defn process-urls
   "Process URLs to get a GitHub repo's API handler URL"
   [from to threads]
   (let [f (fn [{:keys [url] :as data}]
@@ -103,8 +94,9 @@
 (defn count-stargazers
   "http-kit callback to get stats about GitHub repo stargazers"
   [from-chan-item to-channel response]
-  (let [error? (or (not (http-status-ok? (:status response)))
-                   (some? (:error response)))
+  (let [status (:status response)
+        status-ok? (and (>= status 200) (< status 300))
+        error? (or (not status-ok?) (some? (:error response)))
         body (try (-> (:body response)
                       (json/parse-string true))
                   (catch Exception e {:message (str e)}))
@@ -112,33 +104,47 @@
         stats (if error?
                 {:error? error? :message message}
                 {:stars (:stargazers_count body)})]
-    (counter-inc!)
+    (swap! rate-limiter (fn [s] (update s :used inc)))
     (async/put! to-channel (-> from-chan-item
                                (assoc :stats stats)
                                (dissoc :api-url)))
     (async/close! to-channel)))
 
-(defn request-or-wait?
-  "Either an HTTP request or waiting for rate limits to reset"
+(defn request-stats
+  "Request repository stats"
   [{:keys [api-url] :as from-chan-item} to-chan]
-  (let [wait? (>= (:used @request-counter)(:limit @request-counter))
-        delay (- (:reset @request-counter) (System/currentTimeMillis))
-        request {:url api-url :method :get :headers (headers)}
+  (let [use-rate-limit? (:rate-limit @options)
+        {:keys [used limit]} @rate-limiter
+        rate-limit-exceeded (>= used limit)
+        ;; 3s is to compansate possible jitter
+        time-to-reset (- (+ (:reset @rate-limiter) 3000)
+                         (System/currentTimeMillis))
+        block? (and use-rate-limit? rate-limit-exceeded (pos? time-to-reset))
+        request {:url api-url :method :get :headers (request-headers)}
         callback (partial count-stargazers from-chan-item to-chan)]
-    (if (and wait? (pos? delay))
+    (if block?
       (do
-        ;; It's ok to block the whole thread here as rate limits are per user
-        (log "Sleep for" delay "milliseconds" "Counter" @request-counter)
-        (Thread/sleep (+ delay delay-offset))
-        (counter-init!)
+        ;; The whole thread (or more depending on parallelism) will be blocked
+        ;; It's ok, because rate-limits are per user
+        (when (:verbose @options)
+          (log
+           "Rate limit exceeded:"
+           "limit:" limit
+           "used:" used
+           "time to reset, min:" (-> time-to-reset
+                                     (/ 1000 60)
+                                     float
+                                     Math/round)))
+        (Thread/sleep time-to-reset)
+        (rate-limiter-init!)
         (http/request request callback))
       (http/request request callback))))
 
-(defn pipe-stats
-  "Process channel with GitHub repo URLs to get repo stats"
+(defn process-stats
+  "Process repositories statistics"
   [from to threads]
   ;; IO-bound async
-  (async/pipeline-async threads to request-or-wait? from))
+  (async/pipeline-async threads to request-stats from))
 
 ;; Entrypoint
 
@@ -146,17 +152,27 @@
   "Enrich GitHub projects sequence with extra repo stats"
   ([projects] (repo-stats projects {}))
   ([projects opts]
-   (let [{:keys [buffer-size threads-urls threads-stats token]
-          :or {buffer-size 20 threads-urls 4 threads-stats 4}} opts
-         project-urls (async/chan buffer-size)
-         api-urls (async/chan buffer-size (remove #(nil? (:api-url %))))
-         stars (async/chan buffer-size)]
-     (when token (swap! token-atom (constantly token)))
-     (counter-init!)
-     (async/onto-chan project-urls projects)
-     (pipe-urls project-urls api-urls threads-urls)
-     (pipe-stats api-urls stars threads-stats)
-     (async/<!! (async/into [] stars)))))
+   (let [{:keys
+          [buffer-size
+           threads-urls
+           threads-stats]
+          :or
+          {buffer-size 20
+           threads-urls 4
+           threads-stats 4}} opts
+         chan-project-urls (async/chan buffer-size)
+         chan-api-urls (async/chan buffer-size (remove #(nil? (:api-url %))))
+         chan-stats (async/chan buffer-size)]
+     (opts-init! opts)
+     (rate-limiter-init!)
+
+     (async/onto-chan chan-project-urls projects)
+     (process-urls chan-project-urls chan-api-urls threads-urls)
+     (process-stats chan-api-urls chan-stats threads-stats)
+
+     (async/<!! (async/into [] chan-stats)))))
+
+;; REPL payground
 
 (comment
   (def example-projects

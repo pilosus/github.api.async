@@ -106,7 +106,8 @@
         message (when error? (or (:message body) (:error response)))
         stats (if error?
                 {:error? error? :message message}
-                {:stars (:stargazers_count body)})]
+                {:stars (:stargazers_count body)
+                 :pushed-at (:pushed_at body)})]
     (swap! rate-limiter (fn [s] (update s :used inc)))
     (async/put! to-channel (-> from-chan-item
                                (assoc :stats stats)
@@ -145,7 +146,7 @@
         (http/request request callback))
       (do
         (async/put! to-chan (-> from-chan-item
-                                (assoc :stats {:stars nil})
+                                (assoc :stats {:stars nil :pushed-at nil})
                                 (dissoc :api-url)))
         (async/close! to-chan)))))
 
@@ -190,14 +191,6 @@
    (fn [acc v] (conj acc (assoc item k v)))
    '() (get item k)))
 
-(defn- flatten-keys
-  "Flatten nested map"
-  [item]
-  (let [ks [:stats :stars]]
-    (-> item
-        (assoc (last ks) (get-in item ks))
-        (dissoc (first ks)))))
-
 (defn toolbox-stats
   "Get projects from clojure-toolbox.com, enrich with GitHub stars"
   [opts]
@@ -209,18 +202,19 @@
             (repo-stats opts))]
     (->> projects
          (map (partial normalize :categories))
-         flatten
-         (map flatten-keys))))
+         flatten)))
 
 
 (defn- fmt-project
-  [{:keys [name url platforms stars description]}]
-  (let [platforms' (s/join ", " platforms)
+  [{:keys [stats name url platforms description]}]
+  (let [{:keys [stars pushed-at]} stats
+        platforms' (s/join ", " platforms)
         mandatory (format "- [%s](%s) [%s]" name url platforms')
         rating (if stars (format "%s ⭐ %s" mandatory stars) mandatory)
+        updated (if pushed-at (format "%s (upd. %s)" rating pushed-at) rating)
         desc (if description
-               (format "%s: %s" rating description)
-               rating)]
+               (format "%s: %s" updated description)
+               updated)]
     desc))
 
 (defn fmt-toolbox-stats

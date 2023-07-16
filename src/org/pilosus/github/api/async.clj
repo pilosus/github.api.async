@@ -181,7 +181,7 @@
 
      (async/<!! (async/into [] chan-stats)))))
 
-;; REPL payground
+;; Usage example
 
 (defn- normalize
   "Normalize item by values for a given key"
@@ -212,12 +212,47 @@
          flatten
          (map flatten-keys))))
 
+
+(defn- fmt-project
+  [{:keys [name url platforms stars description]}]
+  (let [platforms' (s/join ", " platforms)
+        mandatory (format "- [%s](%s) [%s]" name url platforms')
+        rating (if stars (format "%s ⭐ %s" mandatory stars) mandatory)
+        desc (if description
+               (format "%s: %s" rating description)
+               rating)]
+    desc))
+
+(defn fmt-toolbox-stats
+  "Convert grouped projects from clojure-toolbox to Markdown string"
+  [projects]
+  (let [body
+        (loop [items (seq projects), acc ""]
+          (let [[category listing] (first items)
+                category-fmt (format "## %s" category)
+                projects-fmt (->> listing
+                                  (sort-by #(-> %
+                                                :name
+                                                s/lower-case))
+                                  (map fmt-project)
+                                  (s/join "\n"))
+                output (format "%s%s\n\n%s\n\n" acc category-fmt projects-fmt)]
+            (if items
+              (recur (next items) output)
+              acc)))
+        timestamp (str (java.time.ZonedDateTime/now (java.time.ZoneId/of "UTC")))]
+    (format "%sLast updated: %s" body timestamp)))
+
 (comment
   (time
    (def projects
-     (group-by
-      :categories
+     (->>
       (toolbox-stats
-       {:token nil
+       ;; Go grab you personal GitHub API Token here:
+       ;; https://github.com/settings/tokens
+       {:token nil  ;; FIXME use token
         :threads-stats 10
-        :verbose false})))))
+        :verbose false})
+      (group-by :categories)
+      (sort-by #(-> % first s/lower-case)))))
+  (spit "clojure-toolbox.md" (fmt-toolbox-stats projects)))

@@ -249,4 +249,6 @@
         :verbose false})
       (group-by :categories)
       (sort-by #(-> % first s/lower-case)))))
+  ;; See output example here:
+  ;; https://gist.github.com/pilosus/8d1ed78c2851e6f82b54357ac4b5e220#file-clojure-toolbox-md
   (spit "clojure-toolbox.md" (fmt-toolbox-stats projects)))

@@ -126,22 +126,28 @@
         request {:url api-url :method :get :headers (request-headers)}
         callback (partial count-stargazers from-chan-item to-chan)]
     (log "Requesting URL:" api-url)
-    (if block?
-      (do
-        ;; The whole thread (or more depending on parallelism) will be blocked
-        ;; It's ok, because rate-limits are per user
-        (log
-         "Rate limit exceeded:"
-         "limit:" limit
-         "used:" used
-         "time to reset, min:" (-> time-to-reset
-                                   (/ 1000 60)
-                                   float
-                                   Math/round))
-        (Thread/sleep time-to-reset)
-        (rate-limiter-init!)
+    (if api-url
+      (if block?
+        (do
+          ;; The whole thread (or more depending on parallelism) will be blocked
+          ;; It's ok, because rate-limits are per user
+          (log
+           "Rate limit exceeded:"
+           "limit:" limit
+           "used:" used
+           "time to reset, min:" (-> time-to-reset
+                                     (/ 1000 60)
+                                     float
+                                     Math/round))
+          (Thread/sleep time-to-reset)
+          (rate-limiter-init!)
+          (http/request request callback))
         (http/request request callback))
-      (http/request request callback))))
+      (do
+        (async/put! to-chan (-> from-chan-item
+                                (assoc :stats {:stars nil})
+                                (dissoc :api-url)))
+        (async/close! to-chan)))))
 
 (defn process-stats
   "Process repositories statistics"
@@ -164,7 +170,7 @@
            threads-urls 4
            threads-stats 4}} opts
          chan-project-urls (async/chan buffer-size)
-         chan-api-urls (async/chan buffer-size (remove #(nil? (:api-url %))))
+         chan-api-urls (async/chan buffer-size)
          chan-stats (async/chan buffer-size)]
      (opts-init! opts)
      (rate-limiter-init!)

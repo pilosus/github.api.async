@@ -107,7 +107,8 @@
         stats (if error?
                 {:error? error? :message message}
                 {:stars (:stargazers_count body)
-                 :pushed-at (:pushed_at body)})]
+                 :pushed-at (:pushed_at body)
+                 :description (:description body)})]
     (swap! rate-limiter (fn [s] (update s :used inc)))
     (async/put! to-channel (-> from-chan-item
                                (assoc :stats stats)
@@ -204,10 +205,9 @@
          (map (partial normalize :categories))
          flatten)))
 
-
 (defn- fmt-project
-  [{:keys [stats name url platforms description]}]
-  (let [{:keys [stars pushed-at]} stats
+  [{:keys [stats name url platforms]}]
+  (let [{:keys [stars pushed-at description]} stats
         platforms' (s/join ", " platforms)
         mandatory (format "- [%s](%s) [%s]" name url platforms')
         rating (if stars (format "%s ⭐ %s" mandatory stars) mandatory)
